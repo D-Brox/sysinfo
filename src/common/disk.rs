@@ -131,6 +131,118 @@ impl Disk {
         self.inner.is_read_only()
     }
 
+    /// Returns the number of bytes read since the last refresh.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.bytes_read());
+    /// }
+    /// ```
+    pub fn bytes_read(&self) -> u64 {
+        self.inner.bytes_read()
+    }
+
+    /// Returns the total number of bytes read.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.total_bytes_read());
+    /// }
+    /// ```
+    pub fn total_bytes_read(&self) -> u64 {
+        self.inner.total_bytes_read()
+    }
+
+    /// Returns the number of bytes written since the last refresh.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.bytes_write());
+    /// }
+    /// ```
+    pub fn bytes_write(&self) -> u64 {
+        self.inner.bytes_write()
+    }
+
+    /// Returns the total number of bytes written.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.total_bytes_write());
+    /// }
+    /// ```
+    pub fn total_bytes_write(&self) -> u64 {
+        self.inner.total_bytes_write()
+    }
+
+    /// Returns the number of read operations since last refresh.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.read_operations());
+    /// }
+    /// ```
+    pub fn read_operations(&self) -> u64 {
+        self.inner.read_operations()
+    }
+
+    /// Returns the number total number of read operations.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.total_read_operations());
+    /// }
+    /// ```
+    pub fn total_read_operations(&self) -> u64 {
+        self.inner.total_read_operations()
+    }
+
+    /// Returns the number of write operations since last refresh.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.write_operations());
+    /// }
+    /// ```
+    pub fn write_operations(&self) -> u64 {
+        self.inner.write_operations()
+    }
+
+    /// Returns the total number of write operations.
+    ///
+    /// ```no_run
+    /// use sysinfo::Disks;
+    ///
+    /// let disks = Disks::new_with_refreshed_list();
+    /// for disk in disks.list() {
+    ///     println!("[{:?}] {}B", disk.name(), disk.total_write_operations());
+    /// }
+    /// ```
+    pub fn total_write_operations(&self) -> u64 {
+        self.inner.total_write_operations()
+    }
+
     /// Updates the disk' information.
     ///
     /// ```no_run

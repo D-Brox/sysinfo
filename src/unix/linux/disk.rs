@@ -6,6 +6,7 @@ use crate::{Disk, DiskKind};
 use libc::statvfs;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -16,15 +17,74 @@ macro_rules! cast {
     };
 }
 
+#[derive(Debug, Clone)]
+pub struct DiskStat {
+    read_ops: u64,
+    read_bytes: u64,
+    write_ops: u64,
+    write_bytes: u64,
+}
+
+impl DiskStat {
+    pub fn from_line(line: &str, sector_size: u64) -> DiskStat {
+        let mut s = line.trim().split_whitespace();
+
+        let reads = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+        let reads_merged = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+        let sectors_read = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+        s.next();
+        let writes = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+        let writes_merged = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+        let sectors_write = s
+            .next()
+            .map(|s| u64::from_str_radix(s, 10).unwrap())
+            .unwrap();
+
+        DiskStat {
+            read_ops: reads + reads_merged,
+            read_bytes: sectors_read * sector_size,
+            write_ops: writes + writes_merged,
+            write_bytes: sectors_write * sector_size,
+        }
+    }
+}
+
 pub(crate) struct DiskInner {
     type_: DiskKind,
     device_name: OsString,
+    stat_file: PathBuf,
     file_system: OsString,
     mount_point: PathBuf,
     total_space: u64,
     available_space: u64,
+    sector_size: u64,
     is_removable: bool,
     is_read_only: bool,
+
+    old_read_bytes: u64,
+    old_write_bytes: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+
+    old_read_ops: u64,
+    old_write_ops: u64,
+    read_ops: u64,
+    write_ops: u64,
 }
 
 impl DiskInner {
@@ -60,7 +120,60 @@ impl DiskInner {
         self.is_read_only
     }
 
+    pub(crate) fn bytes_read(&self) -> u64 {
+        self.read_bytes.saturating_sub(self.old_read_bytes)
+    }
+
+    pub(crate) fn total_bytes_read(&self) -> u64 {
+        self.read_bytes
+    }
+
+    pub(crate) fn bytes_write(&self) -> u64 {
+        self.write_bytes.saturating_sub(self.old_write_bytes)
+    }
+
+    pub(crate) fn total_bytes_write(&self) -> u64 {
+        self.write_bytes
+    }
+
+    pub(crate) fn read_operations(&self) -> u64 {
+        self.read_ops.saturating_sub(self.old_read_ops)
+    }
+
+    pub(crate) fn total_read_operations(&self) -> u64 {
+        self.read_ops
+    }
+
+    pub(crate) fn write_operations(&self) -> u64 {
+        self.write_ops.saturating_sub(self.old_write_ops)
+    }
+
+    pub(crate) fn total_write_operations(&self) -> u64 {
+        self.write_ops
+    }
+
+    #[inline]
+    pub(crate) fn update_disk_stats(&mut self) {
+        let mut line = String::new();
+        let _ = BufReader::new(
+            fs::File::open(self.stat_file.clone()).expect("stat file doesn't exist"),
+        )
+        .read_line(&mut line);
+        let stat = DiskStat::from_line(&line, self.sector_size);
+        self.old_read_bytes = self.read_bytes;
+        self.old_write_bytes = self.write_bytes;
+        self.old_read_ops = self.read_ops;
+        self.old_write_ops = self.write_ops;
+
+        self.read_ops = stat.read_ops;
+        self.write_ops = stat.write_ops;
+
+        self.read_bytes = stat.read_bytes;
+        self.write_bytes = stat.write_bytes;
+    }
+
     pub(crate) fn refresh(&mut self) -> bool {
+        self.update_disk_stats();
         unsafe {
             let mut stat: statvfs = mem::zeroed();
             let mount_point_cpath = to_cpath(&self.mount_point);
@@ -126,19 +239,93 @@ fn new_disk(
         let is_removable = removable_entries
             .iter()
             .any(|e| e.as_os_str() == device_name);
+
+        let (stat_file, sector_size) = find_stat_for_device_name(device_name);
+        let mut line = String::new();
+        let _ = BufReader::new(fs::File::open(stat_file.clone()).expect("stat file doesn't exist"))
+            .read_line(&mut line);
+        let stats = DiskStat::from_line(&line, sector_size);
+
         Some(Disk {
             inner: DiskInner {
                 type_,
                 device_name: device_name.to_owned(),
+                stat_file,
                 file_system: file_system.to_owned(),
                 mount_point,
                 total_space: cast!(total),
                 available_space: cast!(available),
+                sector_size,
                 is_removable,
                 is_read_only,
+
+                read_bytes: stats.read_bytes,
+                old_read_bytes: stats.read_bytes,
+                read_ops: stats.read_ops,
+                old_read_ops: stats.read_ops,
+
+                write_bytes: stats.write_bytes,
+                old_write_bytes: stats.write_bytes,
+                write_ops: stats.write_ops,
+                old_write_ops: stats.write_ops,
             },
         })
     }
+}
+
+fn find_stat_for_device_name(device_name: &OsStr) -> (PathBuf, u64) {
+    let device_name_path = device_name.to_str().unwrap_or_default();
+    let real_path = fs::canonicalize(device_name).unwrap_or_else(|_| PathBuf::from(device_name));
+    let mut real_path = real_path.to_str().unwrap_or_default();
+    let mut parent_path = "";
+    if device_name_path.starts_with("/dev/mapper/") || device_name_path.starts_with("/dev/root") {
+        // Recursively solve, for example /dev/dm-0 or /dev/mmcblk0p1
+        if real_path != device_name_path {
+            return find_stat_for_device_name(OsStr::new(&real_path));
+        }
+    } else if device_name_path.starts_with("/dev/sd") || device_name_path.starts_with("/dev/vd") {
+        // Turn "sda1" into "sda" or "vda1" into "vda"
+        real_path = real_path.trim_start_matches("/dev/");
+        parent_path = real_path.trim_end_matches(|c| c >= '0' && c <= '9');
+    } else if device_name_path.starts_with("/dev/nvme")
+        || device_name_path.starts_with("/dev/mmcblk")
+    {
+        // Turn "nvme0n1p1" into "nvme0n1" or "mmcblk0p1" into "mmcblk0"
+        real_path = real_path.trim_start_matches("/dev/");
+        if let Some(idx) = real_path.find('p') {
+            parent_path = &real_path[..idx]
+        };
+    } else {
+        // Default case: remove /dev/ and expects the name presents under /sys/block/
+        // For example, /dev/dm-0 to dm-0
+        real_path = real_path.trim_start_matches("/dev/");
+    }
+    let mut line = String::new();
+    let _ = BufReader::new(
+        fs::File::open(
+            Path::new("/sys/block/")
+                .to_owned()
+                .join(if parent_path.is_empty() {
+                    real_path
+                } else {
+                    parent_path
+                })
+                .join("queue/hw_sector_size"),
+        )
+        .expect("unable to open file"),
+    )
+    .read_line(&mut line);
+    line = line.trim_end().to_string();
+    let sector_size = u64::from_str_radix(&line, 10).unwrap();
+
+    (
+        Path::new("/sys/block/")
+            .to_owned()
+            .join(parent_path)
+            .join(real_path)
+            .join("stat"),
+        sector_size,
+    )
 }
 
 #[allow(clippy::manual_range_contains)]
@@ -156,8 +343,8 @@ fn find_type_for_device_name(device_name: &OsStr) -> DiskKind {
     let device_name_path = device_name.to_str().unwrap_or_default();
     let real_path = fs::canonicalize(device_name).unwrap_or_else(|_| PathBuf::from(device_name));
     let mut real_path = real_path.to_str().unwrap_or_default();
-    if device_name_path.starts_with("/dev/mapper/") {
-        // Recursively solve, for example /dev/dm-0
+    if device_name_path.starts_with("/dev/mapper/") || device_name_path.starts_with("/dev/root") {
+        // Recursively solve, for example /dev/dm-0 or /dev/mmcblk0p1
         if real_path != device_name_path {
             return find_type_for_device_name(OsStr::new(&real_path));
         }
@@ -165,19 +352,10 @@ fn find_type_for_device_name(device_name: &OsStr) -> DiskKind {
         // Turn "sda1" into "sda" or "vda1" into "vda"
         real_path = real_path.trim_start_matches("/dev/");
         real_path = real_path.trim_end_matches(|c| c >= '0' && c <= '9');
-    } else if device_name_path.starts_with("/dev/nvme") {
-        // Turn "nvme0n1p1" into "nvme0n1"
-        real_path = match real_path.find('p') {
-            Some(idx) => &real_path["/dev/".len()..idx],
-            None => &real_path["/dev/".len()..],
-        };
-    } else if device_name_path.starts_with("/dev/root") {
-        // Recursively solve, for example /dev/mmcblk0p1
-        if real_path != device_name_path {
-            return find_type_for_device_name(OsStr::new(&real_path));
-        }
-    } else if device_name_path.starts_with("/dev/mmcblk") {
-        // Turn "mmcblk0p1" into "mmcblk0"
+    } else if device_name_path.starts_with("/dev/nvme")
+        || device_name_path.starts_with("/dev/mmcblk")
+    {
+        // Turn "nvme0n1p1" into "nvme0n1" or "mmcblk0p1" into "mmcblk0"
         real_path = match real_path.find('p') {
             Some(idx) => &real_path["/dev/".len()..idx],
             None => &real_path["/dev/".len()..],
