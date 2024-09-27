@@ -222,6 +222,14 @@ fn new_disk(
     let mut total = 0;
     let mut available = 0;
     let mut is_read_only = false;
+    let (stat_file, sector_size) = find_stat_for_device_name(device_name);
+    let mut line = String::new();
+    let Ok(file) = fs::File::open(stat_file.clone()) else {
+        return None;
+    };
+    let _ = BufReader::new(file).read_line(&mut line);
+    let stats = DiskStat::from_line(&line, sector_size);
+
     unsafe {
         let mut stat: statvfs = mem::zeroed();
         if retry_eintr!(statvfs(mount_point_cpath.as_ptr() as *const _, &mut stat)) == 0 {
@@ -239,12 +247,6 @@ fn new_disk(
         let is_removable = removable_entries
             .iter()
             .any(|e| e.as_os_str() == device_name);
-
-        let (stat_file, sector_size) = find_stat_for_device_name(device_name);
-        let mut line = String::new();
-        let _ = BufReader::new(fs::File::open(stat_file.clone()).expect("stat file doesn't exist"))
-            .read_line(&mut line);
-        let stats = DiskStat::from_line(&line, sector_size);
 
         Some(Disk {
             inner: DiskInner {
@@ -300,23 +302,24 @@ fn find_stat_for_device_name(device_name: &OsStr) -> (PathBuf, u64) {
         // For example, /dev/dm-0 to dm-0
         real_path = real_path.trim_start_matches("/dev/");
     }
-    let mut line = String::new();
-    let _ = BufReader::new(
-        fs::File::open(
-            Path::new("/sys/block/")
-                .to_owned()
-                .join(if parent_path.is_empty() {
-                    real_path
-                } else {
-                    parent_path
-                })
-                .join("queue/hw_sector_size"),
-        )
-        .expect("unable to open file"),
-    )
-    .read_line(&mut line);
-    line = line.trim_end().to_string();
-    let sector_size = u64::from_str_radix(&line, 10).unwrap();
+
+    let sector_size = if let Ok(file) = fs::File::open(
+        Path::new("/sys/block/")
+            .to_owned()
+            .join(if parent_path.is_empty() {
+                real_path
+            } else {
+                parent_path
+            })
+            .join("queue/hw_sector_size"),
+    ) {
+        let mut line = String::new();
+        let _ = BufReader::new(file).read_line(&mut line);
+        line = line.trim_end().to_string();
+        u64::from_str_radix(&line, 10).unwrap()
+    } else {
+        512
+    };
 
     (
         Path::new("/sys/block/")
